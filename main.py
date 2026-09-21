@@ -70,6 +70,36 @@ selected_movie = st.selectbox("영화를 선택하세요", movie_order)
 # 선택한 영화의 데이터만 뽑아서, 날짜순으로 정렬한다.
 movie_df = df[df["영화명"] == selected_movie].sort_values("날짜")
 
+# -----------------------------
+# 날짜 범위 검색(필터)
+# -----------------------------
+# 선택한 영화가 실제로 박스오피스 10위권에 든 첫날 ~ 마지막날을 기본값으로 잡는다.
+movie_min_date = movie_df["날짜"].min().date()
+movie_max_date = movie_df["날짜"].max().date()
+
+date_range = st.date_input(
+    "조회할 날짜 범위를 선택하세요",
+    value=(movie_min_date, movie_max_date),
+    min_value=movie_min_date,
+    max_value=movie_max_date,
+)
+
+# date_input은 사용자가 시작일만 고르고 끝일을 아직 안 골랐을 때
+# 튜플이 아니라 날짜 하나만 돌려줄 때가 있다. 그 경우를 대비해 안전하게 처리한다.
+if isinstance(date_range, tuple) and len(date_range) == 2:
+    start_date, end_date = date_range
+else:
+    start_date = end_date = date_range
+
+# 선택한 날짜 범위로 데이터를 한 번 더 좁힌다.
+movie_df = movie_df[
+    (movie_df["날짜"].dt.date >= start_date) & (movie_df["날짜"].dt.date <= end_date)
+]
+
+if movie_df.empty:
+    st.warning("선택한 날짜 범위에는 데이터가 없습니다. 범위를 다시 선택해 주세요.")
+    st.stop()
+
 fig1 = px.line(
     movie_df,
     x="날짜",
