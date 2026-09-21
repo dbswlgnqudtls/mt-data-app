@@ -1,139 +1,169 @@
 """
-영화 데이터 그래프 도감 1 - 시간
+어제(한국 시간 기준) 박스오피스 순위를 보여주는 스트림릿 앱
 
-KOBIS 일별 박스오피스 1년치 데이터를 가지고, '시간'이라는 주제로
-그래프를 하나씩 늘려가며 살펴보는 앱입니다.
-
-데이터 출처:
-https://raw.githubusercontent.com/greatsong/modudata/main/data/kobis_daily.csv
-(날짜, 순위, 영화코드, 영화명, 일관객, 누적관객, 스크린수, 상영횟수)
+- 조회할 날짜는 코드에 고정하지 않고, 실행 시점마다 '어제(KST)'를 자동 계산합니다.
+  (스트림릿 클라우드 서버 시계는 한국 시간이 아닐 수 있어서, 반드시 한국 시간대로
+   변환한 뒤 하루를 빼는 방식으로 계산합니다.)
+- 인증키는 절대 코드에 적지 않고, 스트림릿의 비밀 금고(secrets)에서 불러옵니다.
+  -> 배포 시 앱 설정의 'Secrets'에 아래처럼 한 줄을 적어두면 됩니다.
+     KOBIS_KEY = "발급받은_인증키"
 """
 
+import requests
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo  # 파이썬 기본 내장 모듈. 시간대 계산용 (별도 설치 불필요)
 
 # -----------------------------
 # 기본 설정
 # -----------------------------
-st.set_page_config(page_title="영화 데이터 그래프 도감 1 - 시간", page_icon="🎞️", layout="wide")
+st.set_page_config(page_title="어제의 박스오피스", page_icon="🎬", layout="wide")
 
-DATA_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/kobis_daily.csv"
+KOBIS_URL = "https://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
+
+
+def get_yesterday_kst() -> str:
+    """한국 시간(KST) 기준으로 '어제' 날짜를 yyyymmdd 형식 문자열로 돌려준다."""
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+    yesterday_kst = now_kst - timedelta(days=1)
+    return yesterday_kst.strftime("%Y%m%d")
 
 
 # -----------------------------
-# 데이터 불러오기
+# API 호출 함수
 # -----------------------------
-# @st.cache_data : 앱이 다시 실행되어도 매번 인터넷에서 새로 내려받지 않고
-# 캐시에 저장된 데이터를 재사용한다. (인터넷 주소의 데이터가 자주 안 바뀌므로
-# 기간 제한 없이 캐시해 둔다. 최신 데이터가 필요하면 화면 우측 상단
-# 메뉴의 'Clear cache'를 쓰면 된다.)
-@st.cache_data
-def load_data() -> pd.DataFrame:
-    df = pd.read_csv(DATA_URL)
+# @st.cache_data(ttl=3600) : 같은 target_dt로 다시 호출하면,
+# 1시간(3600초) 동안은 실제 API를 다시 부르지 않고 저장해둔 결과를 그대로 재사용한다.
+@st.cache_data(ttl=3600)
+def fetch_box_office(target_dt: str) -> dict:
+    """KOBIS 일별 박스오피스 API를 호출해서 원본 JSON(dict)을 돌려준다."""
+    api_key = st.secrets["KOBIS_KEY"]  # 비밀 금고에서만 불러오고, 코드에는 절대 쓰지 않음
+    params = {"key": api_key, "targetDt": target_dt}
+    response = requests.get(KOBIS_URL, params=params, timeout=10)
+    response.raise_for_status()  # 상태코드가 200이 아니면 여기서 예외 발생
+    return response.json()
 
-    # '날짜' 열은 20250901 같은 여덟 자리 숫자 문자열이다.
-    # -> 진짜 날짜(datetime) 타입으로 바꿔서, 날짜순 정렬이나 시계열 그래프에 바로 쓸 수 있게 한다.
-    df["날짜"] = pd.to_datetime(df["날짜"], format="%Y%m%d")
-
-    # 숫자로 다뤄야 하는 열들을 혹시 문자열로 들어와도 안전하게 숫자로 바꿔준다.
-    # (정렬, 계산, 그래프의 y축에 쓰려면 반드시 숫자 타입이어야 한다.)
-    numeric_cols = ["순위", "일관객", "누적관객", "스크린수", "상영횟수"]
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    return df
-
-
-df = load_data()
 
 # -----------------------------
-# 제목
+# 화면 그리기 시작
 # -----------------------------
-st.title("🎞️ 영화 데이터 그래프 도감 1 - 시간")
-st.caption("KOBIS 일별 박스오피스 데이터로, 시간의 흐름에 따른 영화 흥행 변화를 살펴봅니다.")
+st.title("🎬 어제의 박스오피스")
 
-st.divider()
-
-# =========================================================
-# 그래프 구역 1: 영화별 일별 관객수 추이
-# =========================================================
-st.header("1. 영화별 일별 관객수 추이")
-
-# 드롭다운에 넣을 영화 목록: 관객수가 많은 순으로 정렬해서, 유명한 영화가 위쪽에 오게 한다.
-movie_order = (
-    df.groupby("영화명")["일관객"].sum().sort_values(ascending=False).index.tolist()
-)
-
-selected_movie = st.selectbox("영화를 선택하세요", movie_order)
-
-# 선택한 영화의 데이터만 뽑아서, 날짜순으로 정렬한다.
-movie_df = df[df["영화명"] == selected_movie].sort_values("날짜")
+target_dt = get_yesterday_kst()
+target_dt_display = f"{target_dt[0:4]}년 {target_dt[4:6]}월 {target_dt[6:8]}일"
+st.caption(f"조회 기준일(한국 시간, 어제): {target_dt_display}")
 
 # -----------------------------
-# 날짜 범위 검색(필터)
+# API 호출 + 오류 처리
 # -----------------------------
-# 선택한 영화가 실제로 박스오피스 10위권에 든 첫날 ~ 마지막날을 기본값으로 잡는다.
-movie_min_date = movie_df["날짜"].min().date()
-movie_max_date = movie_df["날짜"].max().date()
+data = None
+error_message = None
 
-date_range = st.date_input(
-    "조회할 날짜 범위를 선택하세요",
-    value=(movie_min_date, movie_max_date),
-    min_value=movie_min_date,
-    max_value=movie_max_date,
-)
+try:
+    data = fetch_box_office(target_dt)
+except KeyError:
+    # st.secrets["KOBIS_KEY"]가 아예 등록되어 있지 않을 때 발생
+    error_message = (
+        "인증키(KOBIS_KEY)가 설정되어 있지 않습니다.\n\n"
+        "다음을 확인해 주세요.\n"
+        "- 스트림릿 클라우드 앱의 'Manage app' > Settings > Secrets 메뉴에서\n"
+        "  KOBIS_KEY = \"발급받은_인증키\" 형식으로 한 줄을 추가했는지\n"
+        "- 큰따옴표, 등호(=) 표기가 정확한지\n"
+        "- 저장 후 앱이 재시작될 때까지 잠시 기다렸는지"
+    )
+except requests.exceptions.RequestException:
+    # 인터넷 연결 문제, 타임아웃, KOBIS 서버 문제 등 요청 자체가 실패한 경우
+    error_message = (
+        "박스오피스 정보를 불러오는 데 실패했습니다.\n\n"
+        "다음을 확인해 주세요.\n"
+        "- 인터넷 연결 상태\n"
+        "- KOBIS 서버가 정상 동작 중인지\n"
+        "- 잠시 후 다시 시도"
+    )
 
-# date_input은 사용자가 시작일만 고르고 끝일을 아직 안 골랐을 때
-# 튜플이 아니라 날짜 하나만 돌려줄 때가 있다. 그 경우를 대비해 안전하게 처리한다.
-if isinstance(date_range, tuple) and len(date_range) == 2:
-    start_date, end_date = date_range
-else:
-    start_date = end_date = date_range
+# 요청은 성공했지만, 응답 내용에 문제가 있는 경우 확인
+if data is not None and error_message is None:
+    if "faultInfo" in data:
+        # 인증키가 틀렸거나, 잘못된 요청일 때 상태코드는 200이지만 faultInfo가 온다
+        fault = data["faultInfo"]
+        fault_msg = fault.get("message", "알 수 없는 오류")
+        error_message = (
+            "KOBIS API에서 오류 응답(faultInfo)을 보냈습니다.\n\n"
+            f"오류 메시지: {fault_msg}\n\n"
+            "다음을 확인해 주세요.\n"
+            "- 스트림릿 Secrets에 등록한 KOBIS_KEY 값이 정확한지\n"
+            "- 인증키가 만료되지 않았는지\n"
+            "- 요청 날짜(targetDt) 형식이 올바른지"
+        )
+    else:
+        movie_list = (
+            data.get("boxOfficeResult", {}).get("dailyBoxOfficeList", [])
+        )
+        if not movie_list:
+            error_message = (
+                "영화 목록이 비어 있습니다.\n\n"
+                "다음을 확인해 주세요.\n"
+                "- 조회 날짜(어제)가 실제로 박스오피스 집계가 있는 날짜인지\n"
+                "  (아주 오래된 날짜이거나, 아직 집계 전인 날짜는 비어 있을 수 있습니다)\n"
+                "- KOBIS 서버 점검 여부"
+            )
 
-# 선택한 날짜 범위로 데이터를 한 번 더 좁힌다.
-movie_df = movie_df[
-    (movie_df["날짜"].dt.date >= start_date) & (movie_df["날짜"].dt.date <= end_date)
-]
-
-if movie_df.empty:
-    st.warning("선택한 날짜 범위에는 데이터가 없습니다. 범위를 다시 선택해 주세요.")
+# -----------------------------
+# 오류가 있으면 안내 문구만 보여주고 종료
+# -----------------------------
+if error_message:
+    st.error(error_message)
     st.stop()
 
-fig1 = px.line(
-    movie_df,
-    x="날짜",
-    y="일관객",
-    markers=True,
-    labels={"날짜": "날짜", "일관객": "일일 관객수"},
-    title=f"'{selected_movie}' 일별 관객수 변화",
-)
-# 마우스를 올렸을 때 날짜와 관객수가 보이도록 hover 형식을 지정한다.
-fig1.update_traces(hovertemplate="날짜: %{x|%Y-%m-%d}<br>관객수: %{y:,}명<extra></extra>")
-fig1.update_layout(hovermode="x unified")
+# -----------------------------
+# 정상 데이터 -> 표로 정리
+# -----------------------------
+movie_list = data["boxOfficeResult"]["dailyBoxOfficeList"]
 
-st.plotly_chart(fig1, use_container_width=True)
+rows = []
+for movie in movie_list:
+    rows.append(
+        {
+            "순위": int(movie["rank"]),           # 문자열 -> 숫자로 변환 (정렬/계산용)
+            "영화명": movie["movieNm"],
+            "개봉일": movie["openDt"],
+            "관객수": int(movie["audiCnt"]),
+            "누적관객": int(movie["audiAcc"]),
+            "스크린수": int(movie["scrnCnt"]),
+        }
+    )
 
-# '이 그래프로 알 수 있는 것' 문구를 넣을 자리.
-# 나중에 이 자리에 직접 해설 문장을 채워 넣거나, 필요하면 st.text_area를 지우고
-# 고정 문구(st.info("..."))로 바꿔도 된다.
-st.text_area(
-    "📝 이 그래프로 알 수 있는 것",
-    placeholder="예: 개봉 직후 관객수가 가장 높았다가, 시간이 지나며 점차 줄어드는 것을 볼 수 있다.",
-    key="insight_1",
+df = pd.DataFrame(rows).sort_values("순위").reset_index(drop=True)
+
+# -----------------------------
+# 1위 영화 지표 카드 3장
+# -----------------------------
+top_movie = df.iloc[0]
+
+st.subheader(f"🥇 1위: {top_movie['영화명']}")
+col1, col2, col3 = st.columns(3)
+col1.metric("어제 관객수", f"{top_movie['관객수']:,} 명")
+col2.metric("누적 관객수", f"{top_movie['누적관객']:,} 명")
+col3.metric("스크린수", f"{top_movie['스크린수']:,} 개")
+
+st.divider()
+
+# -----------------------------
+# 전체 순위 표
+# -----------------------------
+st.subheader("📋 전체 순위")
+st.dataframe(
+    df.style.format({"관객수": "{:,}", "누적관객": "{:,}", "스크린수": "{:,}"}),
+    use_container_width=True,
+    hide_index=True,
 )
 
 st.divider()
 
-# =========================================================
-# 그래프 구역 2: (다음에 추가할 그래프 자리)
-# =========================================================
-# st.header("2. ...")
-# ... 그래프 코드 ...
-# st.text_area("📝 이 그래프로 알 수 있는 것", key="insight_2")
-# st.divider()
-
-# =========================================================
-# 그래프 구역 3: (다음에 추가할 그래프 자리)
-# =========================================================
-# st.header("3. ...")
+# -----------------------------
+# 관객수 상위 5편 막대그래프
+# -----------------------------
+st.subheader("📊 관객수 상위 5편")
+top5 = df.sort_values("관객수", ascending=False).head(5).set_index("영화명")
+st.bar_chart(top5["관객수"])
